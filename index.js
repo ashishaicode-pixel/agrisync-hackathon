@@ -1,78 +1,85 @@
-const express = require('express');
-const cors = require('cors');
+/*!
+ * global-prefix <https://github.com/jonschlinkert/global-prefix>
+ *
+ * Copyright (c) 2015-present Jon Schlinkert.
+ * Licensed under the MIT license.
+ */
+
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
-require('dotenv').config();
+const ini = require('ini');
+let prefix;
 
-const authRoutes = require('./routes/auth');
-const batchRoutes = require('./routes/batches');
-const verifyRoutes = require('./routes/verify');
-const ordersRoutes = require('./routes/orders');
-const aiRoutes = require('./routes/ai');
-const quotesRoutes = require('./routes/quotes');
-const otpRoutes = require('./routes/otp');
-const { initDatabase, getDatabase } = require('./database/init');
+const getPrefix = () => {
+  if (process.env.PREFIX) return process.env.PREFIX;
+  if (prefix) return prefix;
 
-const app = express();
-const PORT = process.env.PORT || 5000;
+  // Start by checking if the global prefix is set by the user
+  let home = os.homedir();
 
-// Middleware
-const corsOptions = {
-  origin: process.env.NODE_ENV === 'production' 
-    ? [
-        'https://*.azurestaticapps.net',
-        'https://*.azurewebsites.net',
-        'https://your-custom-domain.com'
-      ]
-    : ['http://localhost:3000'],
-  credentials: true,
-  optionsSuccessStatus: 200
-};
+  // os.homedir() returns undefined if $HOME is not set; path.resolve requires strings
+  if (home) {
+    prefix = tryConfigPath(path.resolve(home, '.npmrc'));
+  }
 
-app.use(cors(corsOptions));
-app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+  if (prefix) {
+    return prefix;
+  }
 
-// Initialize database
-initDatabase();
+  // Otherwise find the path of npm
+  let npm = tryNpmPath();
+  if (npm) {
+    // Check the built-in npm config file
+    prefix = tryConfigPath(path.resolve(npm, '..', '..', 'npmrc'));
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/batches', batchRoutes);
-app.use('/api/verify', verifyRoutes);
-app.use('/api/orders', ordersRoutes);
-app.use('/api/ai', aiRoutes);
-app.use('/api/quotes', quotesRoutes);
-app.use('/api/otp', otpRoutes);
-
-// Public marketplace endpoint - get all batches from all producers
-app.get('/api/marketplace', (req, res) => {
-  const db = getDatabase();
-  
-  db.all(
-    `SELECT b.*, u.username as producer_name, u.organization, u.email as producer_email, u.phone as producer_phone
-     FROM batches b 
-     JOIN users u ON b.producer_id = u.id 
-     ORDER BY b.created_at DESC`,
-    [],
-    (err, batches) => {
-      if (err) {
-        console.error('Marketplace query error:', err);
-        db.close();
-        return res.status(500).json({ error: 'Failed to fetch marketplace products' });
-      }
-      
-      console.log(`Found ${batches.length} batches for marketplace`);
-      db.close();
-      res.json(batches);
+    if (prefix) {
+      // Now the global npm config can also be checked.
+      prefix = tryConfigPath(path.resolve(prefix, 'etc', 'npmrc')) || prefix;
     }
-  );
-});
+  }
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'AgriSync API is running' });
-});
+  if (!prefix) {
+    let { APPDATA, DESTDIR, OSTYPE } = process.env;
 
-app.listen(PORT, () => {
-  console.log(`AgriSync server running on port ${PORT}`);
+    // c:\node\node.exe --> prefix=c:\node\
+    if (process.platform === 'win32' || OSTYPE === 'msys' || OSTYPE === 'cygwin') {
+      prefix = APPDATA ? path.join(APPDATA, 'npm') : path.dirname(process.execPath);
+      return prefix;
+    }
+
+    // /usr/local/bin/node --> prefix=/usr/local
+    prefix = path.dirname(path.dirname(process.execPath));
+
+    // destdir only is respected on Unix
+    if (DESTDIR) {
+      prefix = path.join(DESTDIR, prefix);
+    }
+  }
+
+  return prefix;
+}
+
+function tryNpmPath() {
+  try {
+    return fs.realpathSync(require('which').sync('npm'));
+  } catch (err) { /* do nothing */ }
+}
+
+function tryConfigPath(configPath) {
+  try {
+    return ini.parse(fs.readFileSync(configPath, 'utf-8')).prefix;
+  } catch (err) { /* do nothing */ }
+}
+
+/**
+ * Expose `prefix`
+ */
+
+Reflect.defineProperty(module, 'exports', {
+  get() {
+    return getPrefix();
+  }
 });
